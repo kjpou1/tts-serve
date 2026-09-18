@@ -17,6 +17,7 @@ More information:
 - [Chatterbox](server_chatterbox.md)
 - [OmniVoice](server_omnivoice.md)
 - [Qwen3-TTS](server_qwen3TTS.md)
+- [Qwen3-TTS (MLX)](server_qwen3TTS_mlx.md)
 - [Faster Qwen3-TTS](server_fasterQwen3TTS.md)
 - [dots.tts](server_dotsTTS.md)
 - [Index-TTS](server_indexTTS.md)
@@ -37,6 +38,8 @@ Per [docs/02-language-handling.md](../docs/02-language-handling.md), the
 format differs map it at their own server — the client never sees it:
 
 - **Qwen3-TTS** maps codes to lowercase names (`en` → `english`);
+- **Qwen3-TTS (MLX)** maps codes to lowercase names (`en` → `english`),
+  identically to Qwen3-TTS;
 - **faster-qwen3-tts** maps codes to lowercase names (`en` → `english`);
 - **dots.tts** maps codes to uppercase (`en` → `EN`);
 - **IndexTTS-2.5** maps codes to uppercase (`en` → `EN`) and accepts only
@@ -44,7 +47,7 @@ format differs map it at their own server — the client never sees it:
   422s, because the engine would silently degrade to its `common` vocabulary.
 
 Engines with auto-detection expose it as the special value `auto`
-(Qwen3-TTS, faster-qwen3-tts, dots.tts).
+(Qwen3-TTS, Qwen3-TTS (MLX), faster-qwen3-tts, dots.tts).
 
 **LuxTTS** is the no-support case: the engine has no language parameter at
 all (its tokenizer auto-detects English and Chinese per text segment), so the
@@ -64,6 +67,16 @@ forward it, and advertises `languages: null` in capabilities.
   internally). Omitting `reference_text` transparently enables
   speaker-embedding-only mode (`x_vector_only_mode`), since the engine's
   in-context mode hard-requires a transcript.
+- **Qwen3-TTS (MLX)** — Apple-Silicon-native counterpart to Qwen3-TTS, run
+  through `mlx-audio` instead of `qwen_tts`/PyTorch, for a controlled A/B
+  comparison between the two backends. ICL cloning only, so `reference_text`
+  is **required** (no speaker-embedding fallback). No device env var: MLX has
+  no device-selection knob, so `device` is always reported as `mlx`. `seed`
+  is meaningful (seeds MLX's global RNG via `mx.random.seed()`, which drives
+  the talker's token sampling). Does not (yet) expose `temperature` /
+  `top_p` / `repetition_penalty`, long-text chunking, streaming, or
+  voice-library profiles — see
+  [server_qwen3TTS_mlx.md](server_qwen3TTS_mlx.md) for the full list.
 - **faster-qwen3-tts** — CUDA-only fork of Qwen3-TTS (its CUDA-graph backend
   rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required). Exposes
   ICL (advanced) mode only, so `reference_text` is **required** — there is no

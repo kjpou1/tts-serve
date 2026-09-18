@@ -32,6 +32,7 @@ import server_indexTTS  # noqa: E402
 import server_luxTTS  # noqa: E402
 import server_omnivoice  # noqa: E402
 import server_qwen3TTS  # noqa: E402
+import server_qwen3TTS_mlx  # noqa: E402
 
 SNAPSHOTS_DIR = Path(__file__).resolve().parent / "snapshots"
 
@@ -40,6 +41,7 @@ ENGINES = (
     (server_chatterbox, "chatterbox_capabilities.json"),
     (server_omnivoice, "omnivoice_capabilities.json"),
     (server_qwen3TTS, "qwen3_capabilities.json"),
+    (server_qwen3TTS_mlx, "qwen3_mlx_capabilities.json"),
     (server_fasterQwen3TTS, "faster_qwen3_capabilities.json"),
     (server_dotsTTS, "dots_capabilities.json"),
     (server_indexTTS, "indextts_capabilities.json"),
