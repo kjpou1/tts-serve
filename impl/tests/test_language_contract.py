@@ -23,6 +23,7 @@ import server_indexTTS
 import server_luxTTS
 import server_omnivoice
 import server_qwen3TTS
+import server_qwen3TTS_mlx
 from helpers import b64, make_wav_bytes
 
 # (server module, does the engine offer an 'auto' auto-detection sentinel?)
@@ -30,12 +31,22 @@ SERVERS = [
     (server_chatterbox, False),
     (server_omnivoice, False),
     (server_qwen3TTS, True),
+    (server_qwen3TTS_mlx, True),
     (server_fasterQwen3TTS, True),
     (server_dotsTTS, True),
     (server_indexTTS, False),
     (server_luxTTS, False),
 ]
-SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "faster-qwen3-tts", "dots-tts", "index-tts", "lux-tts"]
+SERVER_IDS = [
+    "chatterbox",
+    "omnivoice",
+    "qwen3-tts",
+    "qwen3-tts-mlx",
+    "faster-qwen3-tts",
+    "dots-tts",
+    "index-tts",
+    "lux-tts",
+]
 
 
 @pytest.fixture(params=SERVERS, ids=SERVER_IDS)
@@ -68,9 +79,10 @@ def _payload(module):
     # is valid even for tests where the handler is expected to run (400
     # audio pre-flight); undecodable audio is swapped in where needed.
     payload = {"text": "Hello there", "audio_base64": b64(make_wav_bytes(3.0))}
-    # faster-qwen3-tts exposes ICL (advanced) mode only, so its reference
-    # transcript is a hard requirement rather than an optional refinement.
-    if module is server_fasterQwen3TTS:
+    # faster-qwen3-tts and qwen3-tts-mlx expose ICL (advanced) mode only, so
+    # their reference transcript is a hard requirement rather than an
+    # optional refinement.
+    if module in (server_fasterQwen3TTS, server_qwen3TTS_mlx):
         payload["reference_text"] = "A short, exact transcript of the reference clip."
     return payload
 

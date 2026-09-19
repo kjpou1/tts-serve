@@ -176,7 +176,7 @@ Top level:
 | `schema_version` | int | Bumped only for breaking changes (§3.5). |
 | `engine` | string | Stable slug: `chatterbox`, `omnivoice`, `qwen3-tts`, … Used by app for profile caching. |
 | `model` | string | Human-readable loaded-model label (e.g. `chatterbox-multilingual-v3`). |
-| `device` | string | `cuda` / `cpu` / `mps`. Informational. |
+| `device` | string | `cuda` / `cpu` / `mps` / `mlx`. Informational. |
 | `sample_rate` | int | **Output** sample rate. App resamples downstream if it needs a uniform rate. |
 | `watermarked` | bool | Output carries a neural watermark (Chatterbox: PerTh). App should surface this to end users. |
 | `endpoint` | string | Synthesis path (`/synthesize`). |
