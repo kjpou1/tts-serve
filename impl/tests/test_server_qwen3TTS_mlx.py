@@ -9,9 +9,8 @@ is out of scope here -- this suite must never import MLX or load the model.
 import types
 
 import pytest
-from fastapi.testclient import TestClient
-
 import server_qwen3TTS_mlx as srv
+from fastapi.testclient import TestClient
 from helpers import b64, load_snapshot, make_wav_bytes
 
 
@@ -166,13 +165,13 @@ def test_synthesize_unsupported_language_rejected(client):
 # test_language_contract.py; keep only engine-specific language tests here.
 
 
-def test_synthesize_seed_out_of_range_rejected(client):
+def test_synthesize_seed_below_min_rejected(client):
     payload = _valid_payload()
     payload["seed"] = 0
     assert _post(client, payload).status_code == 422
 
 
-def test_synthesize_seed_zero_rejected(client):
+def test_synthesize_seed_above_max_rejected(client):
     payload = _valid_payload()
     payload["seed"] = 1001
     assert _post(client, payload).status_code == 422
