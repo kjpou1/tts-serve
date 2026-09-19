@@ -7,7 +7,7 @@ build/
 .venv/
 venv/
 
-* mlx environments
+# mlx environments
 
 .venv-mlx/
 venv-mlx/
