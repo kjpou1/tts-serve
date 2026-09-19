@@ -27,6 +27,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [Chatterbox](impl/server_chatterbox.md)
 - [OmniVoice](impl/server_omnivoice.md)
 - [Qwen3-TTS](impl/server_qwen3TTS.md)
+- [Qwen3-TTS (MLX)](impl/server_qwen3TTS_mlx.md)
 - [Faster Qwen3-TTS](impl/server_fasterQwen3TTS.md)
 - [dots.tts](impl/server_dotsTTS.md)
 - [Index-TTS](impl/server_indexTTS.md)
@@ -152,3 +153,5 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - 6 supported engines: Chatterbox, Omnivoice, Qwen3-TTS, faster-Qwen3-TTS, dots.tts, IndexTTS
 - **2026-09-15** [v1.1]
   - Added support for LuxTTS
+- **2026-09-18** [v1.2]
+  - Added support for Qwen3-TTS (MLX)

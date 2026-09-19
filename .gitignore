@@ -6,3 +6,8 @@ dist/
 build/
 .venv/
 venv/
+
+# mlx environments
+
+.venv-mlx/
+venv-mlx/

@@ -55,6 +55,8 @@ from the start (no migration):
 - **LuxTTS** — the engine has no language parameter at all: the server
   accepts any two-letter code but does not forward it, and capabilities
   advertise `languages: null` (the no-support case of this contract).
+- **Qwen3-TTS MLX** — two-letter codes + `auto`; server maps codes →
+  lowercase *names* via `LANGUAGE_CODE_TO_NAME`, matching Qwen3-TTS.
 
 Decisions taken while implementing:
 
