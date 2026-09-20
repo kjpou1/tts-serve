@@ -78,10 +78,15 @@ forward it, and advertises `languages: null` in capabilities.
   voice-library profiles — see
   [server_qwen3TTS_mlx.md](server_qwen3TTS_mlx.md) for the full list.
 - **faster-qwen3-tts** — CUDA-only fork of Qwen3-TTS (its CUDA-graph backend
-  rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required). Exposes
-  ICL (advanced) mode only, so `reference_text` is **required** — there is no
-  speaker-embedding fallback. `language` takes two-letter codes or `auto`
-  (mapped to the engine's lowercase names).
+  rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required).
+  `xvec_only` (default `true`) selects x-vector mode: the reference audio
+  supplies a speaker embedding, the voice stays consistent across requests
+  (recommended for sentence-by-sentence streaming), and `reference_text` is
+  ignored. `xvec_only=false` switches to ICL mode: `reference_text` becomes
+  **required** (no automatic fallback to x-vector mode) and the voice can vary
+  between requests — pass the same `seed` for each sentence when streaming.
+  `language` takes two-letter codes or `auto` (mapped to the engine's
+  lowercase names).
 - **dots.tts** — 48 kHz output (unlike the 24 kHz engines). The runtime
   demands a file path for the prompt audio, so the server writes a temp file;
   the reference transcript is optional. `language` takes two-letter codes or
@@ -141,9 +146,13 @@ What is covered:
 - `POST /synthesize` reference-audio pre-flight: `400` on undecodable audio
   and clips shorter than the engine's minimum (the stub `soundfile.info()`
   parses real WAV headers via the stdlib `wave` module).
+- faster-qwen3-tts only: the `/synthesize` success path with a fake model —
+  pins what the server forwards to the engine (the `xvec_only` mode flag and
+  transcript handling); real audio generation is still out of scope.
 
-What is *not* covered: actual synthesis (needs a real model + GPU) and the
-success path of `/synthesize`.
+What is *not* covered: actual synthesis (needs a real model + GPU).  The
+`/synthesize` success path is exercised only where a test installs a fake
+model (currently faster-qwen3-tts).
 
 ### Snapshots
 
