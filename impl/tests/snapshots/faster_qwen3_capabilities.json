@@ -16,7 +16,7 @@
     ],
     "min_duration_s": 2.0,
     "max_duration_s": null,
-    "note": "reference_text (the exact transcript) is required: this server runs ICL (advanced) mode, which conditions on the reference audio and transcript together.  The engine appends 0.5 s of silence to the reference before encoding so its final phoneme does not bleed into the start of the output."
+    "note": "reference_text (the exact transcript) is required when xvec_only is false (ICL mode); it is ignored in x-vector mode.  In ICL mode the engine appends 0.5 s of silence to the reference before encoding so its final phoneme does not bleed into the start of the output."
   },
   "languages": [
     "de",
@@ -72,14 +72,14 @@
     {
       "name": "reference_text",
       "type": "string",
-      "required": true,
+      "required": false,
       "default": null,
-      "description": "Exact transcript of the reference audio.  Required: this server runs ICL (advanced) mode, which conditions on the reference audio and its transcript together.",
+      "description": "Exact transcript of the reference audio.  Required when xvec_only is false (ICL mode); ignored when xvec_only is true.  Must be the exact words spoken in the clip: ICL mode conditions on the audio and transcript together, so a wrong transcript degrades cloning quality.",
       "min": null,
       "max": null,
       "step": null,
       "enum": null,
-      "min_length": 1,
+      "min_length": null,
       "max_length": null,
       "item_type": null,
       "min_items": null,
@@ -124,7 +124,7 @@
       "type": "integer",
       "required": false,
       "default": null,
-      "description": "Random seed for reproducibility.  If omitted, a random seed in [1, 1000] is chosen and echoed in the response.",
+      "description": "Random seed for reproducibility.  If omitted, a random seed in [1, 1000] is chosen and echoed in the response.  When streaming sentence-by-sentence with xvec_only=false, pass the same seed for every sentence to reduce voice variation.",
       "min": 1.0,
       "max": 1000.0,
       "step": null,
@@ -136,6 +136,25 @@
       "max_items": null,
       "item_labels": null,
       "group": "common",
+      "advanced": false
+    },
+    {
+      "name": "xvec_only",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "Voice-cloning mode.  True (default): x-vector only \u2014 the reference audio is used solely to compute a speaker embedding, giving a stable, consistent voice across requests (recommended for sentence-by-sentence streaming); reference_text is ignored.  False: ICL mode \u2014 the full reference audio and its exact transcript are kept in the model's context for a closer timbre match, but the voice can vary between requests (especially with a fresh random seed per request) and a correct reference_text is required.",
+      "min": null,
+      "max": null,
+      "step": null,
+      "enum": null,
+      "min_length": null,
+      "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
+      "group": "engine",
       "advanced": false
     },
     {

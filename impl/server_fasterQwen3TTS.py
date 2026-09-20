@@ -2,16 +2,27 @@
 FastAPI REST server for faster-qwen3-tts voice cloning.
 
 faster-qwen3-tts is a CUDA-graphs speed fork of Qwen3-TTS (several times
-faster inference on NVIDIA GPUs).  This server exposes the engine's
-*advanced* (ICL — in-context learning) cloning mode only: the full reference
-audio is kept in the model's context, so the exact transcript of that audio
-is **required** in the request.  The engine's "simple" x-vector-only mode
-(no transcript, reduced quality) is deliberately not exposed.
+faster inference on NVIDIA GPUs).  Both engine cloning modes are exposed,
+selected per request via ``xvec_only``:
+
+- ``xvec_only=true`` (default): x-vector-only mode — the reference audio is
+  used solely to compute a speaker embedding, which anchors the voice
+  consistently across requests (recommended for sentence-by-sentence
+  streaming).  ``reference_text`` is ignored.
+- ``xvec_only=false``: ICL (in-context learning) mode — the full reference
+  audio is kept in the model's context, so the exact transcript of that
+  audio is **required**.  Closer timbre match, but the voice can vary
+  between requests: each request re-samples the reference continuation, and
+  a fresh random seed is drawn per request by default.
+
+The server default (x-vector) deliberately differs from the engine's library
+default (ICL): in our testing the x-vector voice is the more consistent one,
+and that is what sentence-by-sentence streaming wants.
 
 Loads the model once on startup, then exposes a single POST endpoint for
-synthesis.  Clients send text, a reference audio sample (base64), and the
-sample's transcript; the server returns the generated audio as
-base64-encoded 24 kHz WAV.
+synthesis.  Clients send text, a reference audio sample (base64), and — in
+ICL mode — the sample's transcript; the server returns the generated audio
+as base64-encoded 24 kHz WAV.
 
 Capabilities: GET /capabilities returns a machine-readable description of
 every request parameter, derived from the Pydantic request model so it can
@@ -72,7 +83,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from faster_qwen3_tts import FasterQwen3TTS
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
@@ -176,13 +187,14 @@ class SynthesisRequest(BaseModel):
             "for high-quality cloning."
         ),
     )
-    reference_text: str = Field(
-        ...,
-        min_length=1,
+    reference_text: str | None = Field(
+        None,
         description=(
-            "Exact transcript of the reference audio.  Required: this server "
-            "runs ICL (advanced) mode, which conditions on the reference "
-            "audio and its transcript together."
+            "Exact transcript of the reference audio.  Required when "
+            "xvec_only is false (ICL mode); ignored when xvec_only is true.  "
+            "Must be the exact words spoken in the clip: ICL mode conditions "
+            "on the audio and transcript together, so a wrong transcript "
+            "degrades cloning quality."
         ),
     )
     language: Language | None = Field(
@@ -199,11 +211,28 @@ class SynthesisRequest(BaseModel):
         le=SEED_MAX,
         description=(
             "Random seed for reproducibility.  If omitted, a random seed "
-            f"in [{SEED_MIN}, {SEED_MAX}] is chosen and echoed in the response."
+            f"in [{SEED_MIN}, {SEED_MAX}] is chosen and echoed in the "
+            "response.  When streaming sentence-by-sentence with "
+            "xvec_only=false, pass the same seed for every sentence to "
+            "reduce voice variation."
         ),
     )
 
     # --- engine-specific tuning (None = engine default) ---------------------
+    xvec_only: bool = Field(
+        True,
+        description=(
+            "Voice-cloning mode.  True (default): x-vector only — the "
+            "reference audio is used solely to compute a speaker embedding, "
+            "giving a stable, consistent voice across requests (recommended "
+            "for sentence-by-sentence streaming); reference_text is ignored.  "
+            "False: ICL mode — the full reference audio and its exact "
+            "transcript are kept in the model's context for a closer timbre "
+            "match, but the voice can vary between requests (especially with "
+            "a fresh random seed per request) and a correct reference_text "
+            "is required."
+        ),
+    )
     temperature: float | None = Field(
         None,
         ge=0.0,
@@ -232,13 +261,30 @@ class SynthesisRequest(BaseModel):
 
     @field_validator("reference_text")
     @classmethod
-    def _validate_reference_text(cls, v: str) -> str:
-        # ICL mode feeds the transcript straight into the context; a blank
-        # one would clone with an empty prompt and the engine would
-        # mis-condition, so reject it loudly.
+    def _validate_reference_text(cls, v: str | None) -> str | None:
+        # A *provided* blank transcript would clone with an empty prompt in
+        # ICL mode and mis-condition the engine, so reject it loudly.  An
+        # explicit null means 'no transcript' — legal in x-vector mode; the
+        # model_validator below enforces the ICL requirement.  The None guard
+        # is load-bearing: Pydantic runs after-mode validators for an
+        # explicitly-provided null (it only skips them for *omitted* fields),
+        # so without it a null 500s on v.strip() instead of validating.
+        if v is None:
+            return v
         if not v.strip():
             raise ValueError("reference_text must contain non-whitespace characters")
         return v
+
+    @model_validator(mode="after")
+    def _validate_icl_requires_transcript(self) -> "SynthesisRequest":
+        # ICL (xvec_only=False) conditions on the transcript as well as the
+        # audio, so it is a hard requirement there; x-vector mode ignores it
+        # entirely.  (Pydantic field validators alone can't see two fields.)
+        if not self.xvec_only and not (self.reference_text or "").strip():
+            raise ValueError(
+                "reference_text is required when xvec_only is false (ICL mode)"
+            )
+        return self
 
     @field_validator("language", mode="before")
     @classmethod
@@ -283,11 +329,11 @@ CAPABILITIES = build_capabilities(
         "formats": ["wav", "mp3", "ogg", "flac"],
         "min_duration_s": MIN_REF_DURATION_S,
         "note": (
-            "reference_text (the exact transcript) is required: this server "
-            "runs ICL (advanced) mode, which conditions on the reference "
-            "audio and transcript together.  The engine appends 0.5 s of "
-            "silence to the reference before encoding so its final phoneme "
-            "does not bleed into the start of the output."
+            "reference_text (the exact transcript) is required when "
+            "xvec_only is false (ICL mode); it is ignored in x-vector mode.  "
+            "In ICL mode the engine appends 0.5 s of silence to the reference "
+            "before encoding so its final phoneme does not bleed into the "
+            "start of the output."
         ),
     },
     languages=sorted(LANGUAGE_CODES),
@@ -321,11 +367,11 @@ app = FastAPI(
     title="Faster Qwen3-TTS Voice Cloning API",
     description=(
         "REST API around faster-qwen3-tts (CUDA-graphs Qwen3-TTS fork).  "
-        "Send text + a reference audio sample + its transcript and get back "
-        "cloned speech in ICL (advanced) mode.  Machine-readable parameter "
+        "Send text + a reference audio sample (and, in ICL mode, its "
+        "transcript) and get back cloned speech.  Machine-readable parameter "
         "metadata at GET /capabilities."
     ),
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -443,11 +489,14 @@ def health() -> HealthResponse:
 )
 def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     """
-    Synthesize audio using the provided text, reference audio, and transcript.
+    Synthesize audio using the provided text, reference audio, and — in ICL
+    mode — transcript.
 
-    faster-qwen3-tts performs zero-shot voice cloning in ICL (advanced) mode:
-    a short reference audio clip and its exact transcript are kept in the
-    model's context, and new speech is generated in the same voice.
+    faster-qwen3-tts performs zero-shot voice cloning in two modes selected
+    by ``xvec_only``: x-vector-only (default; the reference audio supplies a
+    speaker embedding and the voice stays consistent across requests) or ICL
+    (the reference audio and its exact transcript are kept in the model's
+    context for a closer timbre match).
 
     The full parameter list is documented at GET /capabilities; the request
     schema mirrors it exactly (same model, no drift).
@@ -462,10 +511,12 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     engine_language = LANGUAGE_CODE_TO_NAME.get(req.language, req.language)
 
     logger.info(
-        "Synthesizing: seed={}, text_len={}, ref_text_len={}, lang={} (engine: {})",
+        "Synthesizing: seed={}, xvec_only={}, text_len={}, ref_text_len={}, "
+        "lang={} (engine: {})",
         seed,
+        req.xvec_only,
         len(req.text),
-        len(req.reference_text),
+        len(req.reference_text or ""),
         req.language,
         engine_language,
     )
@@ -499,8 +550,14 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
                 text=req.text,
                 language=engine_language,  # e.g. 'en' -> 'english'; 'auto' passes through
                 ref_audio=prompt_audio_path,
-                ref_text=req.reference_text,
-                xvec_only=False,  # ICL (advanced) mode is all this server offers
+                # The engine wants a str.  In x-vector mode it ignores the
+                # transcript — but the transcript is part of the engine's
+                # voice-prompt cache key, so forward a canonical "" there;
+                # forwarding per-request transcripts would create duplicate
+                # cache entries for the same speaker embedding.  (In ICL mode
+                # the model_validator guarantees a non-null transcript.)
+                ref_text="" if req.xvec_only else req.reference_text,
+                xvec_only=req.xvec_only,  # True: x-vector only; False: ICL
                 **sampling,
             )
 

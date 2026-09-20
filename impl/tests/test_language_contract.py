@@ -79,10 +79,10 @@ def _payload(module):
     # is valid even for tests where the handler is expected to run (400
     # audio pre-flight); undecodable audio is swapped in where needed.
     payload = {"text": "Hello there", "audio_base64": b64(make_wav_bytes(3.0))}
-    # faster-qwen3-tts and qwen3-tts-mlx expose ICL (advanced) mode only, so
-    # their reference transcript is a hard requirement rather than an
-    # optional refinement.
-    if module in (server_fasterQwen3TTS, server_qwen3TTS_mlx):
+    # qwen3-tts-mlx exposes ICL (advanced) mode only, so its reference
+    # transcript is a hard requirement rather than an optional refinement.
+    # (faster-qwen3-tts defaults to x-vector mode, which ignores it.)
+    if module is server_qwen3TTS_mlx:
         payload["reference_text"] = "A short, exact transcript of the reference clip."
     return payload
 

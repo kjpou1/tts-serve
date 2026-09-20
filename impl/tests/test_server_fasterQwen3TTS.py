@@ -3,8 +3,11 @@
 Covers the model-free HTTP surface: /capabilities (snapshot), /health, the
 landing page, request-body validation (422s), and the reference-audio
 pre-flight checks (400s).  The shared staging helper is tested in
-``tts-engine-common/tests/test_staging.py`` (it is engine-agnostic).  Real
-synthesis needs the model + GPU and is out of scope here.
+``tts-engine-common/tests/test_staging.py`` (it is engine-agnostic).
+
+A handful of /synthesize success-path tests use a fake model (below) purely
+to pin the argument forwarding to ``generate_voice_clone``; the engine call
+itself still needs the model + GPU and is out of scope here.
 """
 
 import types
@@ -54,11 +57,23 @@ def test_capabilities_required_fields(client):
     by_name = {p["name"]: p for p in doc["parameters"]}
     assert by_name["text"]["required"] is True
     assert by_name["audio_base64"]["required"] is True
-    # ICL (advanced) mode conditions on the transcript as well as the
-    # audio, so it is a hard requirement, not an optional refinement.
-    assert by_name["reference_text"]["required"] is True
+    # The transcript is a hard requirement *in ICL mode* (enforced by a
+    # cross-field validator), but not at the schema level: x-vector mode —
+    # the default — ignores it.
+    assert by_name["reference_text"]["required"] is False
     assert by_name["language"]["required"] is False
     assert by_name["seed"]["required"] is False
+
+
+def test_capabilities_xvec_only_spec(client):
+    doc = client.get("/capabilities").json()
+    by_name = {p["name"]: p for p in doc["parameters"]}
+    spec = by_name["xvec_only"]
+    assert spec["type"] == "boolean"
+    assert spec["required"] is False
+    # x-vector mode is the default: it is the stable-voice mode, the one
+    # that fixes sentence-by-sentence streaming.
+    assert spec["default"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +125,80 @@ def test_synthesize_missing_required_fields_rejected(client):
     assert _post(client, {}).status_code == 422
 
 
-def test_synthesize_missing_reference_text_rejected(client):
-    # Advanced (ICL) mode only: without a transcript the request is invalid
-    # at the boundary, not a 400 or a fallback to x-vector mode.
+def test_synthesize_missing_reference_text_xvec_mode_accepted(client, fake_model):
+    # x-vector mode (the default) ignores the transcript, so omitting it is
+    # valid — this is the sentence-streaming use case.
     payload = _valid_payload()
     del payload["reference_text"]
+    response = _post(client, payload)
+    assert response.status_code == 200
+    # The engine still receives an explicit (empty) transcript.
+    assert fake_model.calls[-1]["xvec_only"] is True
+    assert fake_model.calls[-1]["ref_text"] == ""
+
+
+def test_synthesize_explicit_null_reference_text_xvec_mode_accepted(client, fake_model):
+    # An explicit null means 'no transcript' — it must validate like an
+    # omitted field, not 500 inside the field validator (regression:
+    # Pydantic runs after-mode validators for an explicitly-provided None).
+    payload = _valid_payload()
+    payload["reference_text"] = None
+    response = _post(client, payload)
+    assert response.status_code == 200
+    assert fake_model.calls[-1]["xvec_only"] is True
+    assert fake_model.calls[-1]["ref_text"] == ""
+
+
+def test_synthesize_explicit_null_reference_text_icl_mode_rejected(client):
+    # In ICL mode the transcript is a hard requirement: an explicit null is
+    # 'no transcript', so it 422s with the cross-field message.
+    payload = _valid_payload()
+    payload["reference_text"] = None
+    payload["xvec_only"] = False
+    response = _post(client, payload)
+    assert response.status_code == 422
+    assert "reference_text" in response.text
+
+
+def test_synthesize_icl_mode_missing_reference_text_rejected(client):
+    # ICL (xvec_only=false) conditions on the transcript as well as the
+    # audio, so without one the request is invalid at the boundary — not a
+    # 400 and not a silent fallback to x-vector mode.
+    payload = _valid_payload()
+    del payload["reference_text"]
+    payload["xvec_only"] = False
+    response = _post(client, payload)
+    assert response.status_code == 422
+    assert "reference_text" in response.text
+
+
+def test_synthesize_xvec_only_non_boolean_rejected(client):
+    # Pydantic v2 lax mode would coerce "yes"/"true"/"1"; use a value that
+    # is not coercible.
+    payload = _valid_payload()
+    payload["xvec_only"] = "banana"
     assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_icl_mode_forwarded_to_engine(client, fake_model):
+    payload = _valid_payload()
+    payload["xvec_only"] = False
+    response = _post(client, payload)
+    assert response.status_code == 200
+    assert fake_model.calls[-1]["xvec_only"] is False
+    assert fake_model.calls[-1]["ref_text"] == payload["reference_text"]
+
+
+def test_synthesize_xvec_mode_transcript_not_forwarded(client, fake_model):
+    # x-vector mode ignores the transcript — and must forward a canonical ""
+    # to the engine, because the transcript is part of the engine's voice-
+    # prompt cache key (forwarding it would create duplicate entries for the
+    # same speaker embedding).
+    payload = _valid_payload()  # includes reference_text; xvec_only defaults True
+    response = _post(client, payload)
+    assert response.status_code == 200
+    assert fake_model.calls[-1]["xvec_only"] is True
+    assert fake_model.calls[-1]["ref_text"] == ""
 
 
 def test_synthesize_empty_text_rejected(client):
@@ -196,6 +279,40 @@ def fake_runtime(monkeypatch):
         "_runtime",
         types.SimpleNamespace(sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE),
     )
+
+
+class _FakeModel:
+    """Records ``generate_voice_clone`` kwargs; returns a silent waveform."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def generate_voice_clone(self, **kwargs):
+        self.calls.append(kwargs)
+        # Like the engine: a list of waveforms, wavs[0] being the 1-D
+        # audio.  A plain list is enough for the endpoint's len() math.
+        waveform = [0.0] * (srv.SAMPLE_RATE // 10)  # ~0.1 s of silence
+        return [waveform], srv.SAMPLE_RATE
+
+
+@pytest.fixture
+def fake_model(monkeypatch):
+    """Install a recording model and a no-op WAV encoder.
+
+    The stub numpy/soundfile refuse ``clip()``/``write()`` by design (real
+    synthesis needs the model + GPU), so the success-path tests stand in for
+    the encoder: they assert only on what the server sent to the engine.
+    """
+    model = _FakeModel()
+    monkeypatch.setattr(
+        srv,
+        "_runtime",
+        types.SimpleNamespace(
+            model=model, sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE
+        ),
+    )
+    monkeypatch.setattr(srv, "_numpy_to_wav_bytes", lambda arr, sr: b"RIFFfake")
+    return model
 
 
 def test_synthesize_undecodable_audio_rejected(client, fake_runtime):
