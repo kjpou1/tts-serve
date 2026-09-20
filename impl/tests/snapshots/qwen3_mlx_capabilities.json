@@ -213,6 +213,25 @@
       "item_labels": null,
       "group": "engine",
       "advanced": false
+    },
+    {
+      "name": "chunk_crossfade_ms",
+      "type": "integer",
+      "required": false,
+      "default": 0,
+      "description": "Linear crossfade applied between generated text chunks, in milliseconds (0-50). Mutually exclusive with chunk_silence_ms. Default is 0 (no crossfade).",
+      "min": 0.0,
+      "max": 50.0,
+      "step": null,
+      "enum": null,
+      "min_length": null,
+      "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
+      "group": "engine",
+      "advanced": false
     }
   ]
 }

@@ -10,9 +10,15 @@ Loads the model once on startup, then exposes a single POST endpoint for
 synthesis.  Clients send text, a reference audio sample (base64), and its
 exact transcript; the server returns the generated audio as base64-encoded
 24 kHz WAV.  Only ICL (in-context learning) voice cloning is exposed in this
-first version: ``reference_text`` is required, there is no
-speaker-embedding-only fallback, no long-text chunking, no streaming, and no
-voice-library / preset-voice modes.  (See ``server_qwen3TTS.py`` for those.)
+first version: ``reference_text`` is required, and there is no
+speaker-embedding-only fallback, streaming, or voice-library / preset-voice
+modes.  (See ``server_qwen3TTS.py`` for those.)
+
+Optional long-text chunking is supported: when ``chunking_enabled`` is set,
+text is split into smaller chunks (``chunk_min_chars``/``chunk_max_chars``)
+that are synthesized independently and then joined, either with silence
+(``chunk_silence_ms``) or a short linear crossfade (``chunk_crossfade_ms``,
+mutually exclusive with silence) at each join between chunks.
 
 Capabilities: GET /capabilities returns a machine-readable description of
 every request parameter, derived from the Pydantic request model so it can
@@ -222,6 +228,16 @@ class SynthesisRequest(BaseModel):
             "Default is 0."
         ),
     )
+    chunk_crossfade_ms: int = Field(
+        0,
+        ge=0,
+        le=50,
+        description=(
+            "Linear crossfade applied between generated text chunks, in "
+            "milliseconds (0-50). Mutually exclusive with chunk_silence_ms. "
+            "Default is 0 (no crossfade)."
+        ),
+    )
 
     @field_validator("text")
     @classmethod
@@ -254,6 +270,15 @@ class SynthesisRequest(BaseModel):
         if self.chunk_min_chars > self.chunk_max_chars:
             raise ValueError(
                 "chunk_min_chars must be less than or equal to chunk_max_chars"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_chunk_join_mode(self):
+        if self.chunk_silence_ms > 0 and self.chunk_crossfade_ms > 0:
+            raise ValueError(
+                "chunk_silence_ms and chunk_crossfade_ms are mutually "
+                "exclusive; set at most one of them above 0"
             )
         return self
 
@@ -503,12 +528,13 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
         logger.info(
             "Chunking: enabled={}, chunks={}, min_chars={}, max_chars={}, "
-            "silence_ms={}",
+            "silence_ms={}, crossfade_ms={}",
             req.chunking_enabled,
             len(text_chunks),
             req.chunk_min_chars,
             req.chunk_max_chars,
             req.chunk_silence_ms,
+            req.chunk_crossfade_ms,
         )
 
         with _synthesis_lock:
@@ -577,6 +603,14 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
         if len(audio_chunks) == 1:
             wav = audio_chunks[0]
+        elif req.chunk_crossfade_ms > 0:
+            # Mutually exclusive with silence (enforced by
+            # _validate_chunk_join_mode), so no silence gap here.
+            wav = _crossfade_audio_chunks(
+                audio_chunks,
+                sr,
+                req.chunk_crossfade_ms,
+            )
         else:
             silence_samples = int(sr * req.chunk_silence_ms / 1000)
 
@@ -705,6 +739,40 @@ def _split_text_chunks(
         chunks.append(remaining)
 
     return chunks
+
+
+def _crossfade_audio_chunks(
+    chunks: list[np.ndarray],
+    sample_rate: int,
+    crossfade_ms: int,
+) -> np.ndarray:
+    """Join intentional-chunk waveforms with a short linear crossfade.
+
+    Only called between completed intentional-chunk waveforms (never between
+    the generator sub-results that make up a single chunk -- those are
+    concatenated normally before this runs). The overlap length is derived
+    from ``crossfade_ms`` and the actual output sample rate, then clamped per
+    join to the shorter of the audio available on either side, so a short
+    chunk can never produce a negative-length or amplified overlap region.
+    """
+    result = np.asarray(chunks[0], dtype=np.float32)
+    requested_overlap = round(sample_rate * crossfade_ms / 1000)
+
+    for next_chunk in chunks[1:]:
+        next_chunk = np.asarray(next_chunk, dtype=np.float32)
+        overlap = min(requested_overlap, len(result), len(next_chunk))
+
+        if overlap <= 0:
+            result = np.concatenate([result, next_chunk])
+            continue
+
+        fade_out = np.linspace(1.0, 0.0, overlap, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
+        blended = result[-overlap:] * fade_out + next_chunk[:overlap] * fade_in
+
+        result = np.concatenate([result[:-overlap], blended, next_chunk[overlap:]])
+
+    return result
 
 
 def _check_reference_audio(raw_bytes: bytes) -> None:

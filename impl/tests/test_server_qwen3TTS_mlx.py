@@ -11,6 +11,7 @@ this suite must never import MLX or load the model.
 
 import types
 
+import numpy as np
 import pytest
 import server_qwen3TTS_mlx as srv
 from fastapi.testclient import TestClient
@@ -99,6 +100,7 @@ def test_capabilities_required_fields(client):
     assert by_name["chunk_min_chars"]["required"] is False
     assert by_name["chunk_max_chars"]["required"] is False
     assert by_name["chunk_silence_ms"]["required"] is False
+    assert by_name["chunk_crossfade_ms"]["required"] is False
 
 
 def test_capabilities_device_and_sample_rate(client):
@@ -261,6 +263,42 @@ def test_synthesize_negative_chunk_silence_rejected(client):
     assert response.status_code == 422
 
 
+def test_synthesize_chunk_crossfade_defaults_to_zero(client):
+    doc = client.get("/capabilities").json()
+    by_name = {p["name"]: p for p in doc["parameters"]}
+
+    assert by_name["chunk_crossfade_ms"]["default"] == 0
+    assert by_name["chunk_crossfade_ms"]["required"] is False
+
+
+def test_synthesize_negative_chunk_crossfade_rejected(client):
+    payload = _valid_payload()
+    payload["chunk_crossfade_ms"] = -1
+
+    response = _post(client, payload)
+
+    assert response.status_code == 422
+
+
+def test_synthesize_chunk_crossfade_above_max_rejected(client):
+    payload = _valid_payload()
+    payload["chunk_crossfade_ms"] = 51
+
+    response = _post(client, payload)
+
+    assert response.status_code == 422
+
+
+def test_synthesize_silence_and_crossfade_together_rejected(client):
+    payload = _valid_payload()
+    payload["chunk_silence_ms"] = 50
+    payload["chunk_crossfade_ms"] = 10
+
+    response = _post(client, payload)
+
+    assert response.status_code == 422
+
+
 # The shared docs/02 language contract (case, names, garbage, non-strings,
 # null/empty -> 'en') is asserted once for every server in
 # test_language_contract.py; keep only engine-specific language tests here.
@@ -345,6 +383,92 @@ def test_split_text_chunks_hard_splits_long_token():
         "x" * 50,
         "x" * 20,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Crossfade helper
+# ---------------------------------------------------------------------------
+
+
+def test_crossfade_single_chunk_returned_unchanged():
+    chunk = np.arange(100, dtype=np.float32)
+
+    result = srv._crossfade_audio_chunks([chunk], 24000, 10)
+
+    assert np.array_equal(result, chunk)
+
+
+def test_crossfade_disabled_is_plain_concatenation():
+    a = np.ones(1000, dtype=np.float32)
+    b = np.zeros(1000, dtype=np.float32) + 2.0
+
+    result = srv._crossfade_audio_chunks([a, b], 24000, 0)
+
+    assert len(result) == len(a) + len(b)
+    assert np.array_equal(result, np.concatenate([a, b]))
+
+
+def test_crossfade_two_chunks_overlap_and_length():
+    a = np.ones(1000, dtype=np.float32)
+    b = np.ones(1000, dtype=np.float32) * 2.0
+
+    result = srv._crossfade_audio_chunks([a, b], 24000, 10)
+
+    overlap = round(24000 * 10 / 1000)
+    assert overlap == 240
+    assert len(result) == len(a) + len(b) - overlap
+
+
+def test_crossfade_three_chunks_two_joins_length():
+    a = np.ones(1000, dtype=np.float32)
+    b = np.ones(1000, dtype=np.float32) * 2.0
+    c = np.ones(1000, dtype=np.float32) * 3.0
+
+    result = srv._crossfade_audio_chunks([a, b, c], 24000, 10)
+
+    overlap = round(24000 * 10 / 1000)
+    assert len(result) == len(a) + len(b) + len(c) - 2 * overlap
+
+
+def test_crossfade_requested_overlap_larger_than_chunk_is_clamped():
+    a = np.ones(10, dtype=np.float32)
+    b = np.ones(1000, dtype=np.float32) * 2.0
+
+    # 50 ms at 24 kHz would request 1200 samples of overlap, far larger than
+    # `a`; the join must clamp to len(a) instead of raising or corrupting.
+    result = srv._crossfade_audio_chunks([a, b], 24000, 50)
+
+    assert len(result) == len(a) + len(b) - len(a)
+    assert len(result) == len(b)
+
+
+def test_crossfade_blend_is_smooth_and_gain_preserving():
+    # Deterministic arrays so the blend itself can be checked, not just the
+    # resulting length.
+    a = np.ones(1000, dtype=np.float32)
+    b = np.zeros(1000, dtype=np.float32)
+
+    result = srv._crossfade_audio_chunks([a, b], 24000, 10)
+
+    overlap = round(24000 * 10 / 1000)
+    join_start = len(a) - overlap
+    overlap_region = result[join_start : join_start + overlap]
+
+    # No amplification/clipping: values in the overlap stay within [0, 1],
+    # the range spanned by the two chunks being blended.
+    assert np.all(overlap_region <= 1.0 + 1e-6)
+    assert np.all(overlap_region >= 0.0 - 1e-6)
+
+    # Correct fade direction: a (1.0) fading toward b (0.0) is monotonically
+    # non-increasing across the overlap, starting near 1.0 and ending near 0.0.
+    assert overlap_region[0] > overlap_region[-1]
+    assert overlap_region[0] == pytest.approx(1.0, abs=1e-6)
+    assert overlap_region[-1] == pytest.approx(0.0, abs=1e-6)
+    assert np.all(np.diff(overlap_region) <= 1e-6)
+
+    # Audio outside the overlap is untouched.
+    assert np.array_equal(result[:join_start], a[:join_start])
+    assert np.array_equal(result[join_start + overlap :], b[overlap:])
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +636,111 @@ def test_synthesize_chunking_inserts_requested_silence(
     )
 
     assert len(captured["wav"]) == expected_samples
+
+
+def test_synthesize_chunking_crossfade_regression(
+    client,
+    fake_runtime,
+    monkeypatch,
+):
+    calls = []
+
+    def generate(**kwargs):
+        calls.append(kwargs["text"])
+
+        if len(calls) == 1:
+            # First intentional chunk: the engine returns two generator
+            # sub-results, which must still be concatenated normally (never
+            # crossfaded against each other).
+            yield _generated_audio(100)
+            yield _generated_audio(100)
+        else:
+            yield _generated_audio(100)
+
+    fake_runtime.model = types.SimpleNamespace(generate=generate)
+
+    captured = {}
+
+    def fake_numpy_to_wav_bytes(wav, sample_rate):
+        captured["wav"] = wav.copy()
+        captured["sample_rate"] = sample_rate
+        return b"fake wav"
+
+    monkeypatch.setattr(
+        srv,
+        "_numpy_to_wav_bytes",
+        fake_numpy_to_wav_bytes,
+    )
+
+    payload = _valid_payload()
+    payload["text"] = "abcdefghij klmnopqrst uvwxyzabcd efghijklmn"
+    payload["chunking_enabled"] = True
+    payload["chunk_min_chars"] = 10
+    payload["chunk_max_chars"] = 20
+    payload["chunk_crossfade_ms"] = 10
+
+    expected_chunks = srv._split_text_chunks(
+        payload["text"],
+        min_chars=10,
+        max_chars=20,
+    )
+
+    response = _post(client, payload)
+
+    assert response.status_code == 200
+    assert len(expected_chunks) > 1
+
+    # The model is invoked exactly once per intentional text chunk,
+    # regardless of how many generator sub-results the first call yields.
+    assert calls == expected_chunks
+
+    # The first intentional chunk's two sub-results (100 samples each) are
+    # concatenated normally to 200 samples before any crossfade logic runs;
+    # every subsequent intentional chunk is 100 samples. With a 10 ms
+    # crossfade at 24 kHz the requested overlap (240) is clamped to the
+    # shorter side of each join (100 samples), so every join after the first
+    # keeps the running length constant at 200. If the two generator
+    # sub-results had incorrectly been crossfaded against each other instead
+    # of concatenated, the first chunk would collapse to 100 samples and the
+    # final length would be 100 instead of 200.
+    assert len(captured["wav"]) == 200
+
+
+def test_synthesize_crossfade_with_chunking_disabled_is_noop(
+    client,
+    fake_runtime,
+    monkeypatch,
+):
+    def generate(**kwargs):
+        yield _generated_audio(100)
+
+    fake_runtime.model = types.SimpleNamespace(generate=generate)
+
+    captured = {}
+
+    def fake_numpy_to_wav_bytes(wav, sample_rate):
+        captured["wav"] = wav.copy()
+        captured["sample_rate"] = sample_rate
+        return b"fake wav"
+
+    monkeypatch.setattr(
+        srv,
+        "_numpy_to_wav_bytes",
+        fake_numpy_to_wav_bytes,
+    )
+
+    payload = _valid_payload()
+    payload["text"] = "Sentence one. Sentence two. Sentence three."
+    payload["chunking_enabled"] = False
+    payload["chunk_crossfade_ms"] = 10
+
+    response = _post(client, payload)
+
+    # Chunking disabled means exactly one intentional text chunk, so the
+    # crossfade path (which only runs for >1 chunks) never engages even
+    # though chunk_crossfade_ms > 0.
+    assert response.status_code == 200
+    assert len(captured["wav"]) == 100
 
 
 def test_synthesize_empty_middle_chunk_returns_400(
