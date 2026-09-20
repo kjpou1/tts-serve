@@ -70,7 +70,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
 from mlx_audio.tts.utils import load_model
 from mlx_audio.utils import resample_audio
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
@@ -196,6 +196,33 @@ class SynthesisRequest(BaseModel):
         ),
     )
 
+    # --- optional long-text chunking ----------------------------------------
+    chunking_enabled: bool = Field(
+        False,
+        description=(
+            "Split synthesis text into smaller chunks before generation. "
+            "Disabled by default."
+        ),
+    )
+    chunk_min_chars: int = Field(
+        250,
+        ge=1,
+        description="Preferred minimum text chunk size when chunking is enabled.",
+    )
+    chunk_max_chars: int = Field(
+        500,
+        ge=1,
+        description="Maximum text chunk size when chunking is enabled.",
+    )
+    chunk_silence_ms: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Silence inserted between generated text chunks, in milliseconds. "
+            "Default is 0."
+        ),
+    )
+
     @field_validator("text")
     @classmethod
     def _validate_text(cls, v: str) -> str:
@@ -221,6 +248,14 @@ class SynthesisRequest(BaseModel):
         # Runs before the Literal check so the normalized default ('en') is
         # always a valid member.
         return normalize_language(v)
+
+    @model_validator(mode="after")
+    def _validate_chunk_bounds(self):
+        if self.chunk_min_chars > self.chunk_max_chars:
+            raise ValueError(
+                "chunk_min_chars must be less than or equal to chunk_max_chars"
+            )
+        return self
 
 
 class SynthesisResponse(CoreSynthesisResponse):
@@ -334,9 +369,7 @@ def _get_runtime() -> Qwen3TTSMLXRuntime:
         _runtime = Qwen3TTSMLXRuntime(
             model=model, device=DEVICE, sample_rate=model.sample_rate
         )
-        logger.info(
-            "Model loaded successfully (sample_rate={} Hz).", model.sample_rate
-        )
+        logger.info("Model loaded successfully (sample_rate={} Hz).", model.sample_rate)
     return _runtime
 
 
@@ -405,6 +438,11 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     short reference audio clip and its exact transcript are kept in the
     model's context, and new speech is generated in the same voice.
 
+    When chunking is enabled, long text is split into smaller text chunks and
+    each chunk is synthesized independently with the same reference voice,
+    language, and seed sequence. Generated audio is concatenated in order,
+    optionally with silence inserted between text chunks.
+
     The full parameter list is documented at GET /capabilities; the request
     schema mirrors it exactly (same model, no drift).
     """
@@ -414,12 +452,11 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     seed = req.seed if req.seed is not None else random.randint(SEED_MIN, SEED_MAX)
 
     # docs/02: the API speaks two-letter codes; the engine wants lowercase
-    # names.  'auto' passes through (the engine's own auto-detection mode).
+    # names. 'auto' passes through (the engine's own auto-detection mode).
     engine_language = LANGUAGE_CODE_TO_NAME.get(req.language, req.language)
 
     logger.info(
-        "Synthesizing: seed={}, text_len={}, ref_text_len={}, "
-        "lang={} (engine: {})",
+        "Synthesizing: seed={}, text_len={}, ref_text_len={}, " "lang={} (engine: {})",
         seed,
         len(req.text),
         len(req.reference_text),
@@ -430,7 +467,10 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     try:
         raw_audio = decode_base64(req.audio_base64)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid base64 audio: {exc}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid base64 audio: {exc}",
+        )
 
     _check_reference_audio(raw_audio)
 
@@ -438,54 +478,142 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         ref_wav, ref_sr = _decode_wav(raw_audio)
     except Exception as exc:
         raise HTTPException(
-            status_code=400, detail=f"Could not decode reference audio: {exc}"
+            status_code=400,
+            detail=f"Could not decode reference audio: {exc}",
         )
 
-    ref_audio_for_model = _prepare_ref_audio(ref_wav, ref_sr, runtime.sample_rate)
+    ref_audio_for_model = _prepare_ref_audio(
+        ref_wav,
+        ref_sr,
+        runtime.sample_rate,
+    )
 
     try:
         t0 = time.perf_counter()
 
+        text_chunks = (
+            _split_text_chunks(
+                req.text,
+                req.chunk_min_chars,
+                req.chunk_max_chars,
+            )
+            if req.chunking_enabled
+            else [req.text]
+        )
+
+        logger.info(
+            "Chunking: enabled={}, chunks={}, min_chars={}, max_chars={}, "
+            "silence_ms={}",
+            req.chunking_enabled,
+            len(text_chunks),
+            req.chunk_min_chars,
+            req.chunk_max_chars,
+            req.chunk_silence_ms,
+        )
+
         with _synthesis_lock:
             mx.random.seed(seed)
 
-            chunks: list[np.ndarray] = []
+            audio_chunks: list[np.ndarray] = []
             sr = runtime.sample_rate
-            for result in runtime.model.generate(
-                text=req.text,
-                lang_code=engine_language,
-                ref_audio=ref_audio_for_model,
-                ref_text=req.reference_text,
-                stream=False,
-            ):
-                mx.eval(result.audio)
-                chunks.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
-                sr = result.sample_rate
+
+            for chunk_index, text_chunk in enumerate(text_chunks, start=1):
+                generated_for_chunk: list[np.ndarray] = []
+
+                logger.debug(
+                    "Generating text chunk {}/{}: {} chars",
+                    chunk_index,
+                    len(text_chunks),
+                    len(text_chunk),
+                )
+
+                for result in runtime.model.generate(
+                    text=text_chunk,
+                    lang_code=engine_language,
+                    ref_audio=ref_audio_for_model,
+                    ref_text=req.reference_text,
+                    stream=False,
+                ):
+                    mx.eval(result.audio)
+
+                    generated_for_chunk.append(
+                        np.asarray(
+                            result.audio,
+                            dtype=np.float32,
+                        ).reshape(-1)
+                    )
+
+                    sr = result.sample_rate
+
+                if not generated_for_chunk:
+                    logger.warning(
+                        "Synthesis produced no audio for chunk {}/{}: "
+                        "seed={}, text={!r}, lang={} (engine: {})",
+                        chunk_index,
+                        len(text_chunks),
+                        seed,
+                        text_chunk,
+                        req.language,
+                        engine_language,
+                    )
+
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "The model produced no audio for one of the supplied "
+                            "text chunks."
+                        ),
+                    )
+
+                chunk_audio = (
+                    np.concatenate(generated_for_chunk)
+                    if len(generated_for_chunk) > 1
+                    else generated_for_chunk[0]
+                )
+
+                audio_chunks.append(chunk_audio)
 
         time_used = time.perf_counter() - t0
 
-        if not chunks:
-            logger.warning(
-                "Synthesis produced no audio: seed={}, text={!r}, lang={} "
-                "(engine: {})",
-                seed,
-                req.text,
-                req.language,
-                engine_language,
+        if len(audio_chunks) == 1:
+            wav = audio_chunks[0]
+        else:
+            silence_samples = int(sr * req.chunk_silence_ms / 1000)
+
+            silence = (
+                np.zeros(
+                    silence_samples,
+                    dtype=np.float32,
+                )
+                if silence_samples > 0
+                else None
             )
-            raise HTTPException(
-                status_code=500,
-                detail="The model produced no audio for the supplied text.",
-            )
 
-        wav = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+            parts: list[np.ndarray] = []
 
-        rtf = compute_rtf(time_used, len(wav), sr)
+            for index, chunk_audio in enumerate(audio_chunks):
+                if index > 0 and silence is not None:
+                    parts.append(silence)
 
-        audio_bytes = _numpy_to_wav_bytes(wav, sr)
+                parts.append(chunk_audio)
+
+            wav = np.concatenate(parts)
+
+        rtf = compute_rtf(
+            time_used,
+            len(wav),
+            sr,
+        )
+
+        audio_bytes = _numpy_to_wav_bytes(
+            wav,
+            sr,
+        )
+
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
 
         audio_duration = len(wav) / sr if sr else 0.0
+
         logger.info(
             "Synthesis complete: {:.1f} s wall-clock, {:.1f} s audio, RTF={}",
             time_used,
@@ -504,13 +632,79 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     except HTTPException:
         raise
+
     except Exception as exc:
-        logger.error("Synthesis failed: {}", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(
+            "Synthesis failed: {}",
+            exc,
+            exc_info=True,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _split_text_chunks(
+    text: str,
+    min_chars: int,
+    max_chars: int,
+) -> list[str]:
+    """Split text into chunks, preferring natural punctuation boundaries."""
+    text = text.strip()
+
+    if not text:
+        return []
+
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+
+    while len(remaining) > max_chars:
+        window = remaining[:max_chars]
+        split_at = -1
+
+        # Prefer sentence boundaries.
+        for marker in (". ", "! ", "? "):
+            pos = window.rfind(marker)
+            if pos >= min_chars:
+                split_at = max(split_at, pos + 1)
+
+        # Then softer punctuation.
+        if split_at == -1:
+            for marker in ("; ", ": ", ", "):
+                pos = window.rfind(marker)
+                if pos >= min_chars:
+                    split_at = max(split_at, pos + 1)
+
+        # Then a word boundary.
+        if split_at == -1:
+            pos = window.rfind(" ")
+            if pos >= min_chars:
+                split_at = pos
+
+        # Final fallback for pathological long tokens / no whitespace.
+        if split_at == -1:
+            split_at = max_chars
+
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    return chunks
 
 
 def _check_reference_audio(raw_bytes: bytes) -> None:
