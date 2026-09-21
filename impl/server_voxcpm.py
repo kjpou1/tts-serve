@@ -33,9 +33,11 @@ Configuration (environment variables):
                        (openbmb/VoxCPM2) to have it downloaded, or a local
                        path to an already-extracted model directory.
                        Default: openbmb/VoxCPM2
-    VOXCPM_DEVICE      Device to load the model on.  One of: cuda, mps, cpu.
-                       Default: cuda.  None / "auto" is resolved by the
-                       engine (prefers CUDA, then MPS, then CPU).
+    VOXCPM_DEVICE      Device to load the model on: 'auto' (engine picks --
+                        CUDA preferred, then MPS, then CPU), 'cuda',
+                        'cuda:<index>', 'mps', or 'cpu'.  Default: cuda.  The
+                        grammar is checked at import time; an explicit device
+                        that is unavailable fails at model load.
     VOXCPM_MPS_DTYPE   Override dtype for MPS only.  The engine forces
                        float32 on MPS by default because bfloat16/float16
                        cause numerical drift that breaks the diffusion loop.
@@ -63,6 +65,7 @@ import io
 import inspect
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -76,7 +79,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from voxcpm import VoxCPM
 
@@ -111,8 +114,6 @@ from tts_engine_common import (
 # Configuration
 # ---------------------------------------------------------------------------
 
-SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
-
 MODEL_NAME_OR_PATH = os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2")
 DEVICE = os.getenv("VOXCPM_DEVICE", "cuda")
 
@@ -128,11 +129,20 @@ if _MPS_DTYPE:
         )
 
 
+# The engine's device grammar (see voxcpm's resolve_runtime_device):
+# 'auto' (or unset) -> automatic selection, otherwise an explicit device,
+# optionally indexed ('cuda:1').  We check the *grammar* here, at import
+# time, so a typo fails before a model download starts; *availability* of an
+# explicit device is the engine's job at load time (it raises a clear error).
+_DEVICE_RE = re.compile(r"^(auto|cpu|mps|cuda(:\d+)?)$")
+
+
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
-    if DEVICE not in SUPPORTED_DEVICES:
+    if not _DEVICE_RE.match(DEVICE):
         raise ValueError(
-            f"VOXCPM_DEVICE must be one of {SUPPORTED_DEVICES}, got {DEVICE!r}"
+            "VOXCPM_DEVICE must be 'auto', 'cpu', 'mps', 'cuda', or "
+            f"'cuda:<index>', got {DEVICE!r}"
         )
 
 
@@ -187,9 +197,10 @@ class SynthesisRequest(BaseModel):
     reference_text: str | None = Field(
         None,
         description=(
-            "Exact transcript of the reference clip.  Required for ultimate "
-            "cloning (continuation mode) together with `audio_base64`; ignored "
-            "in controllable cloning and voice design modes."
+            "Exact transcript of the reference clip.  Only accepted together "
+            "with `audio_base64` (ultimate cloning / continuation mode); "
+            "providing it without `audio_base64` is rejected (422) -- a "
+            "transcript with no clip is a client error, not a mode switch."
         ),
     )
     language: str | None = Field(
@@ -245,14 +256,6 @@ class SynthesisRequest(BaseModel):
             "default; enable for cleaner output with numbers/abbreviations."
         ),
     )
-    denoise: bool = Field(
-        False,
-        description=(
-            "Denoise the reference/prompt audio with the ZipEnhancer model "
-            "(ModelScope).  Disabled by default -- it pulls in extra runtime "
-            "and is only needed for noisy reference clips."
-        ),
-    )
 
     @field_validator("text")
     @classmethod
@@ -277,6 +280,18 @@ class SynthesisRequest(BaseModel):
         # 'auto' sentinel either -- accept any well-formed code for
         # API consistency (LuxTTS no-support case).
         return validate_language_code(v)
+
+    @model_validator(mode="after")
+    def _reference_text_requires_audio(self) -> "SynthesisRequest":
+        # A transcript with no clip is a client bug, not a mode switch:
+        # silently degrading to voice design would hand back audio the client
+        # did not ask for and mask the bug.  Reject at the boundary (422)
+        # rather than letting the engine's pairing check raise (500).
+        if self.reference_text is not None and self.audio_base64 is None:
+            raise ValueError(
+                "reference_text requires audio_base64 (the clip it transcribes)"
+            )
+        return self
 
 
 class SynthesisResponse(CoreSynthesisResponse):
@@ -316,8 +331,9 @@ CAPABILITIES = build_capabilities(
             "cloning, provide a roughly 3--10 s reference clip (the engine "
             "loads it at 16 kHz via librosa and conditions on its latent "
             "patches).  For ultimate cloning, also pass `reference_text` "
-            "(the exact transcript) -- using the same clip for both gives "
-            "maximum similarity."
+            "(the clip's exact transcript): the model treats the clip as a "
+            "spoken prefix and continues from it, reproducing every vocal "
+            "nuance."
         ),
     },
     languages=None,  # no fixed list; two-letter codes (docs/02), not forwarded
@@ -326,7 +342,6 @@ CAPABILITIES = build_capabilities(
         "inference_timesteps": {"step": 1},
         "retry_badcase": {"advanced": True},
         "normalize": {"advanced": True},
-        "denoise": {"advanced": True},
     },
 )
 
@@ -407,7 +422,11 @@ def _get_runtime() -> VoxCPMRuntime:
         )
         model = VoxCPM.from_pretrained(
             MODEL_NAME_OR_PATH,
-            load_denoiser=False,  # denoiser (ZipEnhancer) is optional; keep off by default
+            # The ZipEnhancer denoiser is deliberately not exposed by this
+            # server: it needs a separate ModelScope download and only helps
+            # very noisy reference clips.  Pre-filtering noisy clips is the
+            # client's job.
+            load_denoiser=False,
             optimize=True,        # torch.compile on CUDA (default True in engine)
             device=DEVICE,
         )
@@ -498,7 +517,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     logger.info(
         "Synthesizing: seed={}, text_len={}, mode={}, cfg={:.1f}, steps={}, "
-        "retry_badcase={}, normalize={}, denoise={}, lang={} (not forwarded)",
+        "retry_badcase={}, normalize={}, lang={} (not forwarded)",
         seed,
         len(req.text),
         "ultimate-cloning" if (req.audio_base64 and req.reference_text)
@@ -508,7 +527,6 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         req.inference_timesteps,
         req.retry_badcase,
         req.normalize,
-        req.denoise,
         req.language,
     )
 
@@ -550,17 +568,24 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             generate_kwargs = {
                 "text": req.text,
                 "prompt_wav_path": prompt_audio_path,
-                "prompt_text": req.reference_text if req.audio_base64 is not None else None,
+                "prompt_text": req.reference_text,
                 "reference_wav_path": reference_audio_path,
                 "cfg_value": req.cfg_value,
                 "inference_timesteps": req.inference_timesteps,
                 "normalize": req.normalize,
-                "denoise": req.denoise,
                 "retry_badcase": req.retry_badcase,
             }
             if _GENERATE_ACCEPTS_SEED:
                 generate_kwargs["seed"] = seed
             wav = runtime.model.generate(**generate_kwargs)
+            # Echo the seed actually used: retry_badcase can increment it
+            # internally across retries, so the engine's tracked value is the
+            # authoritative one (exactly how app.py reads it).  Read it under
+            # the same lock -- a concurrent request's generate() would
+            # overwrite it in the window between release and read otherwise.
+            actual_seed = getattr(
+                runtime.model.tts_model, "last_successful_seed", seed
+            )
 
         time_used = time.perf_counter() - t0
 
@@ -573,11 +598,6 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         # Encode the output WAV to base64.
         audio_bytes = _numpy_to_wav_bytes(audio_array, sample_rate)
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-
-        # Echo the seed actually used: retry_badcase can increment it
-        # internally across retries, so the engine's tracked value is the
-        # authoritative one (exactly how app.py reads it).
-        actual_seed = getattr(runtime.model.tts_model, "last_successful_seed", seed)
 
         audio_duration = len(audio_array) / sample_rate if sample_rate else 0.0
         logger.info(

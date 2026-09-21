@@ -16,7 +16,7 @@
     ],
     "min_duration_s": 2.0,
     "max_duration_s": null,
-    "note": "Optional: omit for voice design mode (a `(control instruction)` prefix in `text` steers the generated voice).  For controllable cloning, provide a roughly 3--10 s reference clip (the engine loads it at 16 kHz via librosa and conditions on its latent patches).  For ultimate cloning, also pass `reference_text` (the exact transcript) -- using the same clip for both gives maximum similarity."
+    "note": "Optional: omit for voice design mode (a `(control instruction)` prefix in `text` steers the generated voice).  For controllable cloning, provide a roughly 3--10 s reference clip (the engine loads it at 16 kHz via librosa and conditions on its latent patches).  For ultimate cloning, also pass `reference_text` (the clip's exact transcript): the model treats the clip as a spoken prefix and continues from it, reproducing every vocal nuance."
   },
   "languages": null,
   "parameters": [
@@ -63,7 +63,7 @@
       "type": "string",
       "required": false,
       "default": null,
-      "description": "Exact transcript of the reference clip.  Required for ultimate cloning (continuation mode) together with `audio_base64`; ignored in controllable cloning and voice design modes.",
+      "description": "Exact transcript of the reference clip.  Only accepted together with `audio_base64` (ultimate cloning / continuation mode); providing it without `audio_base64` is rejected (422) -- a transcript with no clip is a client error, not a mode switch.",
       "min": null,
       "max": null,
       "step": null,
@@ -178,25 +178,6 @@
       "required": false,
       "default": false,
       "description": "Run text normalization (wetext) before generation.  Disabled by default; enable for cleaner output with numbers/abbreviations.",
-      "min": null,
-      "max": null,
-      "step": null,
-      "enum": null,
-      "min_length": null,
-      "max_length": null,
-      "item_type": null,
-      "min_items": null,
-      "max_items": null,
-      "item_labels": null,
-      "group": "engine",
-      "advanced": true
-    },
-    {
-      "name": "denoise",
-      "type": "boolean",
-      "required": false,
-      "default": false,
-      "description": "Denoise the reference/prompt audio with the ZipEnhancer model (ModelScope).  Disabled by default -- it pulls in extra runtime and is only needed for noisy reference clips.",
       "min": null,
       "max": null,
       "step": null,

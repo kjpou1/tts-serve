@@ -13,9 +13,13 @@ Quick stats:
       (base64); clone the timbre while style control still goes via a `(control)`
       prefix in `text`.
     - **Ultimate cloning** -- provide the reference clip plus its exact
-      transcript (`reference_text`); using the same clip for both gives maximum
-      similarity. The engine loads the reference at 16 kHz (librosa) and
-      conditions on its latent patches.
+      transcript (`reference_text`); the model treats the clip as a spoken
+      prefix and continues from it, reproducing every vocal nuance. The engine
+      loads the reference at 16 kHz (librosa) and conditions on its latent
+      patches.
+  - `reference_text` is only accepted together with `audio_base64`; a
+    transcript with no clip is rejected with a `422` (it is a client error,
+    not a mode switch).
   - `reference_audio` is **optional** in capabilities (voice design mode needs
     none), unlike most tts-serve engines where it is required.
   - the engine has **no language parameter**: its text encoder auto-detects the
@@ -95,6 +99,11 @@ export VOXCPM_MODEL=/path/to/VoxCPM2/
 python impl/server_voxcpm.py
 ```
 
+Note: cloning (any use of `reference_audio`) needs a VoxCPM2 checkpoint -- the
+engine rejects reference audio on VoxCPM1 models. VoxCPM1 checkpoints also
+output 16 kHz instead of 48 kHz; the response's `sample_rate` is read from the
+loaded model, so it will report the true rate either way.
+
 ### Run on a different device
 
 By default, VoxCPM will run on `cuda`. To force a different device:
@@ -104,9 +113,12 @@ export VOXCPM_DEVICE=cpu
 python impl/server_voxcpm.py
 ```
 
-`cuda`, `mps`, and `cpu` are accepted. On MPS the engine forces `float32` by
-default (bfloat16/float16 cause numerical drift that breaks the diffusion loop)
--- see the `VOXCPM_MPS_DTYPE` note below if you want to test a different dtype.
+`auto`, `cuda`, `cuda:<index>`, `mps`, and `cpu` are accepted. `auto` lets the
+engine pick (CUDA preferred, then MPS, then CPU); an explicit device that is
+not available on the machine fails at model load with a clear error. On MPS
+the engine forces `float32` by default (bfloat16/float16 cause numerical drift
+that breaks the diffusion loop) -- see the `VOXCPM_MPS_DTYPE` note below if you
+want to test a different dtype.
 
 ### MPS dtype override
 
@@ -134,10 +146,3 @@ The `normalize` flag runs `wetext` text normalization before generation
 (disabled by default). Enable it if you hear issues with numbers,
 abbreviations, or special characters in the input text. It is exposed as an
 advanced parameter (not shown in the default UI) -- send it explicitly if needed.
-
-### Denoising reference audio
-
-The `denoise` flag applies the ZipEnhancer noise-suppression model to the
-reference/prompt clip before encoding (disabled by default). It is only useful
-for noisy reference clips and pulls in extra runtime, so it stays off unless you
-explicitly enable it. It is exposed as an advanced parameter.

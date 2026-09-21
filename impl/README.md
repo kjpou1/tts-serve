@@ -122,15 +122,20 @@ forward it, and advertises `languages: null` in capabilities.
   with a lock: `generate_speech()` mutates the shared vocoder's `return_48k`
   flag in place. `return_smooth` selects the 24 kHz vocoder head
   (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,
-   different artifact profile; try it if you hear metallic artifacts.
+  different artifact profile; try it if you hear metallic artifacts.
 - **VoxCPM** — 48 kHz output (with dots.tts and LuxTTS). Supports three
   modes: voice design (no reference audio -- a `(control instruction)` prefix
   in `text` steers the generated voice), controllable cloning (reference audio
   only), and ultimate cloning (reference audio + exact transcript). Unlike most
-  tts-serve engines, `reference_audio` is **optional** in capabilities. No
+  tts-serve engines, `reference_audio` is **optional** in capabilities (voice
+  design needs no clip); `reference_text` is only accepted together with
+  `audio_base64` (a transcript alone is a `422`). Cloning needs a VoxCPM2
+  checkpoint -- the engine rejects reference audio on VoxCPM1 models. No
   `language` forwarding: the text encoder auto-detects the language from input
   text (30 supported). `seed` is meaningful -- bit-identical on CPU, near-
-  identical on CUDA (non-deterministic GPU kernels). The runtime demands a file
+  identical on CUDA (non-deterministic GPU kernels); the response echoes the
+  seed the engine actually used (it increments the seed on bad-case retries).
+  The runtime demands a file
   path for reference audio, so the server writes a temp file; the engine
   re-encodes each request (no path-keyed cache), so the file is deleted per
   request. Synthesis is serialized with a lock: KV caches are mutated in place,

@@ -2,8 +2,11 @@
 
 These exercise the HTTP surface that does NOT require a loaded model:
 /capabilities (snapshot), /health, the landing page, request-body validation
-(422s), and the reference-audio pre-flight checks (400s).  Synthesis itself
-needs a real model + GPU, so it is intentionally out of scope here.
+(422s), and the reference-audio pre-flight checks (400s).  The three synthesis
+modes (voice design, controllable cloning, ultimate cloning) are additionally
+proven to clear the 422 boundary and reach the engine call, which raises on
+the import-only stub (500).  Actual synthesis needs a real model + GPU, so it
+is intentionally out of scope here.
 """
 
 import types
@@ -104,7 +107,7 @@ def test_synthesize_unknown_field_rejected(client):
 
 def test_synthesize_missing_required_fields_rejected(client):
     # 'text' is the only required field; audio_base64 is optional (voice design).
-    assert _post(client, {"text": ""}).status_code == 422
+    assert _post(client, {}).status_code == 422
 
 
 def test_synthesize_empty_text_rejected(client):
@@ -124,6 +127,20 @@ def test_synthesize_empty_audio_rejected(client):
     # audio_base64 has max_length validation: an empty string is below min_length.
     payload["audio_base64"] = ""
     assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_reference_text_without_audio_rejected(client):
+    # A transcript with no clip is a client bug, not a mode switch: silently
+    # degrading to voice design would hand back audio the client did not ask
+    # for and mask the bug, so the boundary rejects it (422, not 500).
+    payload = {
+        "text": "Hello there",
+        "reference_text": "Exact transcript of the reference clip.",
+    }
+    response = _post(client, payload)
+    assert response.status_code == 422
+    # The validator's message makes it unambiguous which pairing failed.
+    assert "reference_text" in str(response.json()["detail"])
 
 
 # The shared docs/02 language contract (case, names, garbage, non-strings,
@@ -181,11 +198,52 @@ def test_synthesize_normalize_bad_type_rejected(client):
 # ---------------------------------------------------------------------------
 
 
+class _StubModel:
+    """Raises where the import-only engine stub would: at the generate() boundary."""
+
+    def generate(self, *args, **kwargs):
+        raise NotImplementedError(
+            "voxcpm stub: generate() is not available in tests"
+        )
+
+
 @pytest.fixture
 def fake_runtime(monkeypatch):
+    # The model raises at generate(), so tests that reach it prove the request
+    # cleared the 422 boundary (actual synthesis needs a real model + GPU).
     monkeypatch.setattr(
-        srv, "_runtime", types.SimpleNamespace(sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE)
+        srv,
+        "_runtime",
+        types.SimpleNamespace(
+            sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE, model=_StubModel()
+        ),
     )
+
+
+def test_synthesize_voice_design_no_audio_passes_validation(client, fake_runtime):
+    # Voice design (no reference audio) clears request validation; the stub
+    # model then raises -> 500, which is the proof we got past the 422s.
+    payload = {"text": "Hello there"}
+    response = _post(client, payload)
+    assert response.status_code == 500
+    assert "not available in tests" in response.json()["detail"]
+
+
+def test_synthesize_controllable_cloning_passes_validation(client, fake_runtime):
+    # Reference audio only: valid 3 s clip clears validation and pre-flight,
+    # then the stub model raises -> 500.
+    response = _post(client, _valid_payload())
+    assert response.status_code == 500
+    assert "not available in tests" in response.json()["detail"]
+
+
+def test_synthesize_ultimate_cloning_passes_validation(client, fake_runtime):
+    # Ultimate cloning: reference audio + its transcript.
+    payload = _valid_payload()
+    payload["reference_text"] = "Exact transcript of the reference clip."
+    response = _post(client, payload)
+    assert response.status_code == 500
+    assert "not available in tests" in response.json()["detail"]
 
 
 def test_synthesize_undecodable_audio_rejected(client, fake_runtime):
