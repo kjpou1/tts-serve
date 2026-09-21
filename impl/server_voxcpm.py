@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import base64
 import io
+import inspect
 import os
 import random
 import threading
@@ -78,6 +79,20 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from voxcpm import VoxCPM
+
+# The `seed` parameter was added to ``VoxCPM._generate`` in a later VoxCPM
+# release.  Older installs (e.g. 2.0.0 / 1.5.0 on PyPI) raise
+# "unexpected keyword argument 'seed'" if we pass it, so introspect the
+# installed engine and only forward ``seed`` when the signature supports it.
+try:
+    _GENERATE_ACCEPTS_SEED = (
+        "seed" in inspect.signature(VoxCPM._generate).parameters
+    )
+except AttributeError:
+    # Stub (test machines) or an engine version that doesn't expose _generate —
+    # seed is applied via torch.manual_seed in seed_everything() anyway.
+    _GENERATE_ACCEPTS_SEED = False
+
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
@@ -529,18 +544,23 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
         with _synthesis_lock:
             seed_everything(seed)
-            wav = runtime.model.generate(
-                text=req.text,
-                prompt_wav_path=prompt_audio_path,
-                prompt_text=req.reference_text if req.audio_base64 is not None else None,
-                reference_wav_path=reference_audio_path,
-                cfg_value=req.cfg_value,
-                inference_timesteps=req.inference_timesteps,
-                normalize=req.normalize,
-                denoise=req.denoise,
-                retry_badcase=req.retry_badcase,
-                seed=seed,
-            )
+            # `_GENERATE_ACCEPTS_SEED` is decided at import time by introspecting
+            # the installed engine, so this stays compatible with both older
+            # VoxCPM releases (no `seed` param) and newer ones.
+            generate_kwargs = {
+                "text": req.text,
+                "prompt_wav_path": prompt_audio_path,
+                "prompt_text": req.reference_text if req.audio_base64 is not None else None,
+                "reference_wav_path": reference_audio_path,
+                "cfg_value": req.cfg_value,
+                "inference_timesteps": req.inference_timesteps,
+                "normalize": req.normalize,
+                "denoise": req.denoise,
+                "retry_badcase": req.retry_badcase,
+            }
+            if _GENERATE_ACCEPTS_SEED:
+                generate_kwargs["seed"] = seed
+            wav = runtime.model.generate(**generate_kwargs)
 
         time_used = time.perf_counter() - t0
 
