@@ -418,11 +418,10 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     engine_language = LANGUAGE_CODE_TO_NAME.get(req.language, req.language)
 
     logger.info(
-        "Synthesizing: seed={}, text_len={}, text={!r}, ref_text_len={}, "
+        "Synthesizing: seed={}, text_len={}, ref_text_len={}, "
         "lang={} (engine: {})",
         seed,
         len(req.text),
-        req.text,
         len(req.reference_text),
         req.language,
         engine_language,
@@ -475,7 +474,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
                 engine_language,
             )
             raise HTTPException(
-                status_code=400,
+                status_code=500,
                 detail="The model produced no audio for the supplied text.",
             )
 
@@ -507,7 +506,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         raise
     except Exception as exc:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))    
+        raise HTTPException(status_code=500, detail=str(exc))
 
 # ---------------------------------------------------------------------------
 # Helpers
