@@ -27,13 +27,6 @@ def client():
 
 @pytest.fixture
 def fake_runtime(monkeypatch):
-    """Install a model-free runtime and bypass full reference-audio decoding.
-
-    The test soundfile stub supports header inspection via sf.info(), which is
-    enough for the reference-audio pre-flight checks, but deliberately does not
-    implement sf.read(). Synthesis-edge-case tests need to get past that decode
-    step without depending on the real soundfile package or MLX.
-    """
     runtime = types.SimpleNamespace(
         model=None,
         sample_rate=srv.SAMPLE_RATE,
@@ -743,7 +736,7 @@ def test_synthesize_crossfade_with_chunking_disabled_is_noop(
     assert len(captured["wav"]) == 100
 
 
-def test_synthesize_empty_middle_chunk_returns_400(
+def test_synthesize_empty_middle_chunk_returns_500(
     client,
     fake_runtime,
 ):
@@ -768,7 +761,7 @@ def test_synthesize_empty_middle_chunk_returns_400(
 
     response = _post(client, payload)
 
-    assert response.status_code == 400
+    assert response.status_code == 500
     assert "produced no audio" in response.json()["detail"].lower()
 
 

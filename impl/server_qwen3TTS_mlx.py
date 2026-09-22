@@ -574,17 +574,16 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
                 if not generated_for_chunk:
                     logger.warning(
                         "Synthesis produced no audio for chunk {}/{}: "
-                        "seed={}, text={!r}, lang={} (engine: {})",
+                        "seed={}, lang={} (engine: {})",
                         chunk_index,
                         len(text_chunks),
                         seed,
-                        text_chunk,
                         req.language,
                         engine_language,
                     )
 
                     raise HTTPException(
-                        status_code=400,
+                        status_code=500,
                         detail=(
                             "The model produced no audio for one of the supplied "
                             "text chunks."
