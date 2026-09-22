@@ -156,3 +156,8 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Added support for LuxTTS
 - **2026-09-18** [v1.2]
   - Added support for Qwen3-TTS (MLX)
+- **2026-09-21** [v1.3]
+  - Added support for VoxCPM (#22)
+  - Expose `xvec_only` as a faster-qwen3-TTS option (#37)
+  - Fix Chatterbox install instructions (#43)
+
