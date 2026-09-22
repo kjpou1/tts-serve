@@ -29,9 +29,18 @@ Configuration (environment variables):
     CHATTERBOX_PORT      Bind port for `python server_chatterbox.py`.
                          Default: 7500
 
-Extra dependencies beyond the chatterbox-tts package:
+Install the engine (pinned git commit -- see note below):
+    pip install "git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2"
+
+Extra dependencies beyond the Chatterbox package:
     pip install fastapi uvicorn loguru soundfile
     pip install ../tts-engine-common # in-repo copy; or: pip install -e ../tts-engine-common
+
+NOTE on installation: the latest PyPI release (chatterbox-tts 0.1.7)
+predates the v3 multilingual API this server imports, and a git install is
+indistinguishable from it via `pip show` (both report 0.1.7). Install from
+the pinned commit above until upstream ships a newer release, then revert
+to: pip install chatterbox-tts
 
 Usage:
     python server_chatterbox.py
@@ -59,12 +68,48 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from chatterbox.mtl_tts import (
-    MULTILINGUAL_T3_MODELS,
-    S3GEN_SR,
-    SUPPORTED_LANGUAGES,
-    ChatterboxMultilingualTTS,
+# The latest PyPI release (chatterbox-tts 0.1.7) predates the v3 multilingual
+# API imported below, and `pip show` cannot tell the two installs apart (both
+# report 0.1.7). Pin the git commit instead. Keep in sync with the module
+# docstring and impl/server_chatterbox.md.
+_CHATTERBOX_INSTALL = (
+    "git+https://github.com/resemble-ai/chatterbox.git"
+    "@5de7a54aa4e5e2baadb0182dde554908b48b85c2"
 )
+
+# If importing fails because *one of these* is missing, the diagnosis is
+# "missing or stale Chatterbox install" and the hint below applies. Any other
+# missing name (e.g. 'torch') is a broken transitive dependency that a
+# reinstall would not fix -- re-raise those untouched.
+_CHATTERBOX_IMPORT_NAMES = (
+    "chatterbox",
+    "chatterbox.mtl_tts",
+    "MULTILINGUAL_T3_MODELS",
+    "S3GEN_SR",
+    "SUPPORTED_LANGUAGES",
+    "ChatterboxMultilingualTTS",
+)
+
+try:
+    from chatterbox.mtl_tts import (
+        MULTILINGUAL_T3_MODELS,
+        S3GEN_SR,
+        SUPPORTED_LANGUAGES,
+        ChatterboxMultilingualTTS,
+    )
+except ImportError as exc:
+    if getattr(exc, "name", None) not in _CHATTERBOX_IMPORT_NAMES:
+        raise
+    # The failed import *is* the version probe: the name exists only in
+    # post-#516 builds, and the version string is useless (see above).
+    raise ImportError(
+        "This server needs the Chatterbox v3 multilingual API, which the "
+        "PyPI release of chatterbox-tts (0.1.7) does not include -- and "
+        "which `pip show` cannot detect (both installs report 0.1.7). "
+        "Install the pinned git commit instead:\n"
+        f'    pip install "{_CHATTERBOX_INSTALL}"'
+    ) from exc
+
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
