@@ -6,11 +6,15 @@ These exercise the HTTP surface that does NOT require a loaded model:
 needs a real model + GPU, so it is intentionally out of scope here.
 """
 
+import os
+import subprocess
+import sys
 import types
 
 import pytest
 from fastapi.testclient import TestClient
 
+import _bootstrap
 import server_chatterbox as srv
 from helpers import b64, load_snapshot, make_wav_bytes
 
@@ -182,3 +186,67 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "2" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Import-time failure: stale chatterbox install (the PyPI 0.1.7 shape)
+# ---------------------------------------------------------------------------
+
+
+def test_import_with_stale_chatterbox_package_raises_with_install_hint(tmp_path):
+    # GIVEN a stale chatterbox install, shaped like PyPI chatterbox-tts 0.1.7:
+    # the mtl_tts module exists but predates the v3 MULTILINGUAL_T3_MODELS
+    # table this server imports -- the import is what tells the two builds
+    # apart (both report version 0.1.7).  The fake also omits
+    # SUPPORTED_LANGUAGES, which real 0.1.7 does export; harmless, since the
+    # first missing name is MULTILINGUAL_T3_MODELS either way.
+    stale_pkg = tmp_path / "stale_chatterbox" / "chatterbox"
+    stale_pkg.mkdir(parents=True)
+    (stale_pkg / "__init__.py").write_text("")
+    (stale_pkg / "mtl_tts.py").write_text(
+        "S3GEN_SR = 24000\n\n\nclass ChatterboxMultilingualTTS:\n    pass\n"
+    )
+
+    # AND a subprocess with the same import environment the suite uses:
+    # stale package first, then impl/ + tts-engine-common src + stubs.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(tmp_path / "stale_chatterbox"),
+            str(_bootstrap.COMMON_SRC),
+            str(_bootstrap.IMPL_DIR),
+            str(_bootstrap.STUBS_DIR),
+        ]
+    )
+
+    # WHEN the server module is imported,
+    # THEN it should fail fast with an actionable ImportError that names the
+    # pinned git install -- not just a bare "cannot import name" traceback.
+    result = subprocess.run(
+        [sys.executable, "-c", "import server_chatterbox"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    # THEN the failure is non-zero and the hint is actionable, naming the
+    # exact pinned install the server module advertises:
+    assert result.returncode != 0
+    assert "chatterbox-tts (0.1.7)" in result.stderr
+    assert "pip install" in result.stderr
+    assert srv._CHATTERBOX_INSTALL in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Install instructions: the .md must advertise the same pinned commit the
+# ImportError message does (the "keep in sync" contract in the server module).
+# ---------------------------------------------------------------------------
+
+
+def test_install_instructions_advertise_the_pinned_commit():
+    # The ImportError hint is built from _CHATTERBOX_INSTALL, so a commit
+    # bump updates the user-facing error automatically; this pins the install
+    # doc to the same constant -- the exact drift that broke the instructions.
+    doc = (_bootstrap.IMPL_DIR / "server_chatterbox.md").read_text()
+    assert srv._CHATTERBOX_INSTALL in doc
