@@ -1,9 +1,10 @@
 """Tests for ``server_qwen3TTS_mlx.py``.
 
 Covers the model-free HTTP surface: /capabilities (snapshot), /health, the
-landing page, request-body validation (422s), and the reference-audio
-pre-flight checks (400s).  Real synthesis needs mlx-audio + Apple Silicon and
-is out of scope here -- this suite must never import MLX or load the model.
+landing page, request-body validation (422s), synthesis edge cases (500s),
+and the reference-audio pre-flight checks (400s). Real synthesis needs
+mlx-audio + Apple Silicon and is out of scope here -- this suite must never
+import MLX or load the model.
 """
 
 import types
@@ -17,8 +18,38 @@ from helpers import b64, load_snapshot, make_wav_bytes
 @pytest.fixture(scope="module")
 def client():
     # Deliberately NOT a context manager: entering it would run the FastAPI
-    # lifespan, which loads the (stubbed) model.  Not needed for these tests.
+    # lifespan, which loads the (stubbed) model. Not needed for these tests.
     return TestClient(srv.app)
+
+
+@pytest.fixture
+def fake_runtime(monkeypatch):
+    """Install a model-free runtime and bypass full reference-audio decoding.
+
+    The test soundfile stub supports header inspection via sf.info(), which is
+    enough for the reference-audio pre-flight checks, but deliberately does not
+    implement sf.read(). Synthesis-edge-case tests need to get past that decode
+    step without depending on the real soundfile package or MLX.
+    """
+    runtime = types.SimpleNamespace(
+        model=None,
+        sample_rate=srv.SAMPLE_RATE,
+        device=srv.DEVICE,
+    )
+
+    monkeypatch.setattr(srv, "_runtime", runtime)
+    monkeypatch.setattr(
+        srv,
+        "_decode_wav",
+        lambda raw: (object(), srv.SAMPLE_RATE),
+    )
+    monkeypatch.setattr(
+        srv,
+        "_prepare_ref_audio",
+        lambda *args, **kwargs: object(),
+    )
+
+    return runtime
 
 
 # ---------------------------------------------------------------------------
@@ -178,17 +209,23 @@ def test_synthesize_seed_above_max_rejected(client):
 
 
 # ---------------------------------------------------------------------------
-# POST /synthesize — reference-audio pre-flight (400)
+# POST /synthesize — synthesis edge cases (500)
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def fake_runtime(monkeypatch):
-    monkeypatch.setattr(
-        srv,
-        "_runtime",
-        types.SimpleNamespace(sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE),
-    )
+def test_synthesize_no_generated_audio_returns_500(client, fake_runtime):
+    fake_runtime.model = types.SimpleNamespace(generate=lambda **kwargs: iter(()))
+
+    payload = _valid_payload()
+    response = _post(client, payload)
+
+    assert response.status_code == 500
+    assert "produced no audio" in response.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# POST /synthesize — reference-audio pre-flight (400)
+# ---------------------------------------------------------------------------
 
 
 def test_synthesize_undecodable_audio_rejected(client, fake_runtime):

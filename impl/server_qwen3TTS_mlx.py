@@ -418,7 +418,8 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     engine_language = LANGUAGE_CODE_TO_NAME.get(req.language, req.language)
 
     logger.info(
-        "Synthesizing: seed={}, text_len={}, ref_text_len={}, lang={} (engine: {})",
+        "Synthesizing: seed={}, text_len={}, ref_text_len={}, "
+        "lang={} (engine: {})",
         seed,
         len(req.text),
         len(req.reference_text),
@@ -463,6 +464,20 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
         time_used = time.perf_counter() - t0
 
+        if not chunks:
+            logger.warning(
+                "Synthesis produced no audio: seed={}, text={!r}, lang={} "
+                "(engine: {})",
+                seed,
+                req.text,
+                req.language,
+                engine_language,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="The model produced no audio for the supplied text.",
+            )
+
         wav = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
 
         rtf = compute_rtf(time_used, len(wav), sr)
@@ -487,10 +502,11 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             rtf=rtf,
         )
 
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
-
 
 # ---------------------------------------------------------------------------
 # Helpers

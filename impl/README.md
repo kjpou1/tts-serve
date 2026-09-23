@@ -22,6 +22,7 @@ More information:
 - [dots.tts](server_dotsTTS.md)
 - [Index-TTS](server_indexTTS.md)
 - [LuxTTS](server_luxTTS.md)
+- [VoxCPM](server_voxcpm.md)
 
 
 ## Running
@@ -78,10 +79,15 @@ forward it, and advertises `languages: null` in capabilities.
   voice-library profiles — see
   [server_qwen3TTS_mlx.md](server_qwen3TTS_mlx.md) for the full list.
 - **faster-qwen3-tts** — CUDA-only fork of Qwen3-TTS (its CUDA-graph backend
-  rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required). Exposes
-  ICL (advanced) mode only, so `reference_text` is **required** — there is no
-  speaker-embedding fallback. `language` takes two-letter codes or `auto`
-  (mapped to the engine's lowercase names).
+  rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required).
+  `xvec_only` (default `true`) selects x-vector mode: the reference audio
+  supplies a speaker embedding, the voice stays consistent across requests
+  (recommended for sentence-by-sentence streaming), and `reference_text` is
+  ignored. `xvec_only=false` switches to ICL mode: `reference_text` becomes
+  **required** (no automatic fallback to x-vector mode) and the voice can vary
+  between requests — pass the same `seed` for each sentence when streaming.
+  `language` takes two-letter codes or `auto` (mapped to the engine's
+  lowercase names).
 - **dots.tts** — 48 kHz output (unlike the 24 kHz engines). The runtime
   demands a file path for the prompt audio, so the server writes a temp file;
   the reference transcript is optional. `language` takes two-letter codes or
@@ -117,6 +123,24 @@ forward it, and advertises `languages: null` in capabilities.
   flag in place. `return_smooth` selects the 24 kHz vocoder head
   (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,
   different artifact profile; try it if you hear metallic artifacts.
+- **VoxCPM** — 48 kHz output (with dots.tts and LuxTTS). Supports three
+  modes: voice design (no reference audio -- a `(control instruction)` prefix
+  in `text` steers the generated voice), controllable cloning (reference audio
+  only), and ultimate cloning (reference audio + exact transcript). Unlike most
+  tts-serve engines, `reference_audio` is **optional** in capabilities (voice
+  design needs no clip); `reference_text` is only accepted together with
+  `audio_base64` (a transcript alone is a `422`). Cloning needs a VoxCPM2
+  checkpoint -- the engine rejects reference audio on VoxCPM1 models. No
+  `language` forwarding: the text encoder auto-detects the language from input
+  text (30 supported). `seed` is meaningful -- bit-identical on CPU, near-
+  identical on CUDA (non-deterministic GPU kernels); the response echoes the
+  seed the engine actually used (it increments the seed on bad-case retries).
+  The runtime demands a file
+  path for reference audio, so the server writes a temp file; the engine
+  re-encodes each request (no path-keyed cache), so the file is deleted per
+  request. Synthesis is serialized with a lock: KV caches are mutated in place,
+  `torch.compile`d functions are not re-entrant, and `@torch.inference_mode()`
+  contexts are thread-affine.
 
 ## Tests (`tests/`)
 
@@ -141,9 +165,16 @@ What is covered:
 - `POST /synthesize` reference-audio pre-flight: `400` on undecodable audio
   and clips shorter than the engine's minimum (the stub `soundfile.info()`
   parses real WAV headers via the stdlib `wave` module).
+- `POST /synthesize` synthesis edge cases (Qwen3-TTS MLX): 500 with a clear
+  detail when the model generator yields no chunks (stubbed runtime,
+  empty generator).
+- faster-qwen3-tts only: the `/synthesize` success path with a fake model —
+  pins what the server forwards to the engine (the `xvec_only` mode flag and
+  transcript handling); real audio generation is still out of scope.
 
-What is *not* covered: actual synthesis (needs a real model + GPU) and the
-success path of `/synthesize`.
+What is *not* covered: actual synthesis (needs a real model + GPU).  The
+`/synthesize` success path is exercised only where a test installs a fake
+model (currently faster-qwen3-tts).
 
 ### Snapshots
 

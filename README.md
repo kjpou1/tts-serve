@@ -32,6 +32,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [dots.tts](impl/server_dotsTTS.md)
 - [Index-TTS](impl/server_indexTTS.md)
 - [LuxTTS](impl/server_luxTTS.md)
+- [VoxCPM](impl/server_voxcpm.md)
 
 ## Quickstart
 
@@ -155,3 +156,10 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Added support for LuxTTS
 - **2026-09-18** [v1.2]
   - Added support for Qwen3-TTS (MLX)
+- **2026-09-22** [v1.3]
+  - Added support for VoxCPM (#22)
+  - Expose `xvec_only` as a faster-qwen3-TTS option (#37)
+  - Fix Chatterbox install instructions (#43)
+  - Fix Qwen3-TTS MLX emoji-handling bug (#35)
+  - Update new-tts-engine skill a little (#42)
+

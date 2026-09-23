@@ -6,7 +6,14 @@ Quick stats:
 - **Sample rate**: 24 kHz
 - **Notes**:
   - CUDA-only fork of Qwen3-TTS
-  - `reference_text` is **required** — there is no speaker-embedding fallback.
+  - `xvec_only` (default `true`): x-vector mode — the reference audio supplies a
+    speaker embedding, giving a consistent voice across requests; `reference_text`
+    is ignored.
+  - `xvec_only=false`: ICL mode — `reference_text` is **required** (422 without
+    it); there is no automatic fallback to x-vector mode.
+  - The server default (x-vector) deliberately differs from the engine's library
+    default (ICL): in our testing the x-vector voice is the more consistent one,
+    and that is what sentence-by-sentence streaming wants.
 
 ## Installation
 

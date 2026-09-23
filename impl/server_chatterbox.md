@@ -21,10 +21,17 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Now install Chatterbox in this environment:
+Now install Chatterbox in this environment.
+
+> **Note:** the latest PyPI release (`chatterbox-tts` 0.1.7) predates the
+> v3 multilingual API this server requires, so install from the pinned git
+> commit below until upstream ships a newer release. (`pip show` cannot tell
+> the two apart -- both report 0.1.7. If the server starts up and then dies
+> with an `ImportError` naming `MULTILINGUAL_T3_MODELS`, you have the PyPI
+> build; reinstall from git.)
 
 ```
-pip install chatterbox-tts
+pip install "git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2"
 ```
 
 Now clone `tts-serve` and install its dependencies:
