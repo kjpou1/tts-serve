@@ -165,6 +165,9 @@ What is covered:
 - `POST /synthesize` reference-audio pre-flight: `400` on undecodable audio
   and clips shorter than the engine's minimum (the stub `soundfile.info()`
   parses real WAV headers via the stdlib `wave` module).
+- `POST /synthesize` synthesis edge cases (Qwen3-TTS MLX): 500 with a clear
+  detail when the model generator yields no chunks (stubbed runtime,
+  empty generator).
 - faster-qwen3-tts only: the `/synthesize` success path with a fake model —
   pins what the server forwards to the engine (the `xvec_only` mode flag and
   transcript handling); real audio generation is still out of scope.

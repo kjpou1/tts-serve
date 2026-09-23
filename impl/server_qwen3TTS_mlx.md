@@ -16,6 +16,9 @@ Quick stats:
   no such knob; MLX itself picks its compute backend, Metal on Apple Silicon)
 - **Cloning mode**: ICL (in-context learning) only -- `reference_text` is
   **required**. There is no speaker-embedding-only fallback in this version.
+- some short / emoji-only inputs make the model emit no audio; the server
+  logs the exact text and returns 500 with detail 'The model produced no
+  audio for the supplied text.'
 
 ## Differences from `server_qwen3TTS.py`
 

@@ -34,7 +34,7 @@
 - The stub `numpy` must satisfy pytest's own introspection (`isscalar`, `bool_`, `ndarray`, `asarray`). If a cross-suite run dies with `AttributeError: module 'numpy' has no attribute ...`, see the comment in `stubs/numpy/__init__.py`.
 - Pydantic v2 lax mode coerces `"yes"`/`"true"`/`"1"` to booleans — boolean-rejection tests must use values that are *not* coercible.
 - `impl/tests/test_language_contract.py` asserts the shared docs/02 language contract once across *all* servers (null/empty → `en`, 422 for garbage/uppercase/names/non-strings, `auto` per declaration, capabilities default). A new server must be added to its `SERVERS` list; per-server suites keep only engine-specific language tests.
-- The suite covers the HTTP surface (capabilities, health, validation, 400/422 pre-flight). Actual synthesis is **not** tested (it needs a real model + GPU); the `/synthesize` success path is exercised only where a test installs a fake model — currently faster-qwen3-tts (`impl/tests/test_server_fasterQwen3TTS.py`), which pins argument forwarding to `generate_voice_clone`.
+- The suite covers the HTTP surface (capabilities, health, validation, 400/422 pre-flight, and — for Qwen3-TTS MLX — the no-audio-output 500 path (stubbed empty generator). Actual synthesis is **not** tested (it needs a real model + GPU); the `/synthesize` success path is exercised only where a test installs a fake model — currently faster-qwen3-tts (`impl/tests/test_server_fasterQwen3TTS.py`), which pins argument forwarding to `generate_voice_clone`.
 
 ## Per-engine quirks
 
