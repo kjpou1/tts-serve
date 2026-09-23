@@ -402,7 +402,7 @@ enabled automatically.
 Full per-voice timing, silence analysis, loudness measurements, the Marzia
 long-context anomaly, and the crossfade experiment are documented in:
 
-[Qwen3-TTS MLX chunking benchmark](qwen3-mlx-chunking-benchmark.md)
+[Qwen3-TTS MLX chunking benchmark](server_qwen3TTS_mlx_chunking_benchmark.md)
 
 ## Capabilities
 
